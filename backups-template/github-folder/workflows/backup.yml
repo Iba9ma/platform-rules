@@ -1,0 +1,82 @@
+name: نسخ احتياطي نصف شهري
+
+on:
+  schedule:
+    - cron: "17 0 1,16 * *"   # يوم 1 و 16 من كل شهر ، 3:17 فجراً بتوقيت السعودية
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency: backups
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    # الأسرار تُقرأ هنا مرة واحدة ، والمنصة التي لم تُضف أسرارها تُتخطى خطواتها
+    env:
+      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+      TAKAFUL_DATABASE_URL: ${{ secrets.TAKAFUL_DATABASE_URL }}
+      TAKAFUL_SUPABASE_URL: ${{ secrets.TAKAFUL_SUPABASE_URL }}
+      TAKAFUL_SERVICE_ROLE_KEY: ${{ secrets.TAKAFUL_SERVICE_ROLE_KEY }}
+      BTHAT_DATABASE_URL: ${{ secrets.BTHAT_DATABASE_URL }}
+      BTHAT_SUPABASE_URL: ${{ secrets.BTHAT_SUPABASE_URL }}
+      BTHAT_SERVICE_ROLE_KEY: ${{ secrets.BTHAT_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: تثبيت أداة النسخ المطابقة لإصدار قاعدة البيانات
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-save --silent @supabase/supabase-js
+
+      - name: تكافل — قاعدة البيانات
+        if: ${{ env.TAKAFUL_DATABASE_URL != '' }}
+        env:
+          PLATFORM: takaful
+          DATABASE_URL: ${{ env.TAKAFUL_DATABASE_URL }}
+        run: bash scripts/backup-db.sh
+
+      - name: تكافل — الملفات المرفوعة
+        if: ${{ env.TAKAFUL_SERVICE_ROLE_KEY != '' }}
+        env:
+          PLATFORM: takaful
+          SUPABASE_URL: ${{ env.TAKAFUL_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.TAKAFUL_SERVICE_ROLE_KEY }}
+        run: bash scripts/backup-files.sh
+
+      - name: بذات الدين — قاعدة البيانات
+        if: ${{ env.BTHAT_DATABASE_URL != '' }}
+        env:
+          PLATFORM: bthat-aldeen
+          DATABASE_URL: ${{ env.BTHAT_DATABASE_URL }}
+        run: bash scripts/backup-db.sh
+
+      - name: بذات الدين — الملفات المرفوعة
+        if: ${{ env.BTHAT_SERVICE_ROLE_KEY != '' }}
+        env:
+          PLATFORM: bthat-aldeen
+          SUPABASE_URL: ${{ env.BTHAT_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.BTHAT_SERVICE_ROLE_KEY }}
+        run: bash scripts/backup-files.sh
+
+      - name: حذف النسخ الأقدم من 6 أشهر
+        run: bash scripts/prune.sh
+
+      - name: حفظ النسخ في المستودع
+        run: |
+          git config user.name "backups"
+          git config user.email "backups@users.noreply.github.com"
+          git add -A data
+          if git diff --cached --quiet; then echo "لا جديد"; exit 0; fi
+          git commit -q -m "نسخة $(date -u +%F)"
+          git push
